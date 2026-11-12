@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `dns-net`. A living document: every design decision, idea, or open question about dns-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** scaffold, `0.1.0`. **Scheduled later** (see `_strategy/WEB-STACK-DELIVERABLES.md`): `std` covers address lookups until the stack needs more.
+> **Status:** scaffold, `0.1.0`. **Scheduled later**: `std` covers address lookups until the stack needs more.
 
 ---
 
