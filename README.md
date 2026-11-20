@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party dependencies: net-io and mod-rand with the <code>resolver</code> feature (on by default), nothing at all without it.
     </p>
     <blockquote>
-        <strong>Status: <code>0.2.0</code>.</strong> The codec and the resolver, on Linux, macOS, and Windows. DNS over TLS and HTTPS come next (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>).
+        <strong>Status: <code>0.3.0</code>.</strong> The codec and the resolver on Linux, macOS, and Windows, with DNS over TLS behind the <code>tls</code> feature. DNS over HTTPS comes next (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>).
     </blockquote>
 </div>
 
@@ -67,6 +67,22 @@ for record in mx.records() {
 
 `Resolver::park` and `Resolver::park_ip` return a ticket and post to the worker's completion queue when the answer arrives; the session returns `Step::Park` and reads the ticket in `on_wake`. A cached answer is ready at once and nothing parks. See the [`Resolver::park`](https://docs.rs/dns-net/latest/dns_net/struct.Resolver.html#method.park) example.
 
+## Over TLS
+
+With the `tls` feature, upstreams can be reached over TLS only (RFC 7858), checked by certificate name or by a pinned key. Queries share one connection per upstream and are padded so their length gives nothing away; nothing ever falls back to plaintext.
+
+```rust
+use dns_net::{Resolver, ResolverConfig, Upstream};
+
+let config = ResolverConfig::new()
+    .upstream(Upstream::tls("9.9.9.9:853".parse()?, "dns.quad9.net")?)
+    .upstream(Upstream::tls("149.112.112.112:853".parse()?, "dns.quad9.net")?);
+let resolver = Resolver::new(config)?;
+let lookup = resolver.lookup(&"example.com".parse()?, dns_net::RecordType::A)?;
+// The upstream validated it with DNSSEC, over a path nobody could alter.
+let validated = lookup.authenticated();
+```
+
 ## The codec alone
 
 ```rust
@@ -81,7 +97,7 @@ With `default-features = false` the crate is the codec with no dependencies.
 
 ## Scope
 
-Message encoding and decoding with name compression and budgets; A, AAAA, CNAME, NS, PTR, SOA, MX, TXT, SRV, and CAA records; a TTL-respecting cache with negative caching and a byte budget; UDP with TCP fallback, retries, timeouts, and failover; upstreams from `/etc/resolv.conf` or the Windows adapter settings. DNS over TLS and HTTPS, and DNSSEC awareness, come later. A DNS server is out of scope.
+Message encoding and decoding with name compression and budgets; A, AAAA, CNAME, NS, PTR, SOA, MX, TXT, SRV, and CAA records; a TTL-respecting cache with negative caching and a byte budget; UDP with TCP fallback, retries, timeouts, and failover; DNS over TLS; the AD bit from a validating upstream on a trusted path; upstreams from `/etc/resolv.conf` or the Windows adapter settings. DNS over HTTPS comes later. A DNS server is out of scope.
 
 The design, the threats and what each defence costs, and the decision log are in [`dev/PLAN.md`](./dev/PLAN.md); the full API is in [`docs/API.md`](./docs/API.md).
 

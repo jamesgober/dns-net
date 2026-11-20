@@ -15,7 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-dns-net       = { path = ".." }
+dns-net       = { path = "..", features = ["tls"] }
 
 [[bin]]
 name  = "message"
@@ -41,6 +41,13 @@ bench = false
 [[bin]]
 name  = "system_config"
 path  = "fuzz_targets/system_config.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "tls_frames"
+path  = "fuzz_targets/tls_frames.rs"
 test  = false
 doc   = false
 bench = false

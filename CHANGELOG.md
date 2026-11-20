@@ -13,6 +13,34 @@
 
 ---
 
+## [0.3.0] - unreleased
+
+DNS over TLS, and the AD bit.
+
+### Added
+
+- Feature `tls`: DNS over TLS (RFC 7858) through tls-net. `Upstream::tls`
+  checks the server's certificate chain and name; `Upstream::tls_pinned`
+  checks the SHA-256 of its public key. One connection per upstream carries
+  any number of queries, matched by id, and closes after 10 s idle
+  (`ResolverConfig::tls_idle`). Queries are padded to 128-byte blocks.
+  Nothing ever falls back to plaintext: TLS and plain upstreams cannot be
+  mixed, and a failed handshake is `Error::Tls`.
+- `ResolverConfig::tls_client` (trust anchors and policy) and
+  `tls_handshake_timeout`; `ResolverStats::tls_connections`.
+- `Lookup::authenticated`: the upstream validated the answer with DNSSEC,
+  reported only when every reply came over TLS or from loopback. Queries set
+  the AD bit to ask for it.
+- `Exchange::padded`, `Upstream::is_tls`, `Upstream::server_name`.
+
+### Changed
+
+- `Upstream` is no longer `Copy` (it holds the TLS identity).
+- `Answer` is `#[non_exhaustive]` and has an `authentic` field.
+- Every query sets the AD bit.
+
+---
+
 ## [0.2.0] - 2026-11-20
 
 The codec and the resolver. Tagged on GitHub; not yet on crates.io.
@@ -57,6 +85,7 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/dns-net/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/dns-net/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/dns-net/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/dns-net/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/dns-net/releases/tag/v0.1.0

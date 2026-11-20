@@ -15,30 +15,136 @@ const MAX_SYSTEM_UPSTREAMS: usize = 3;
 /// The most bytes of resolv.conf or `reg` output read.
 const MAX_CONFIG_TEXT: usize = 1 << 20;
 
-/// One upstream server: a recursive resolver reached over UDP, and over TCP
-/// when a reply is truncated.
+/// One upstream server: a recursive resolver reached over UDP (and over TCP
+/// when a reply is truncated), or with the `tls` feature over TLS only
+/// (RFC 7858).
 ///
 /// ```
 /// let u = dns_net::Upstream::new("192.0.2.53:53".parse()?);
 /// assert_eq!(u.addr().port(), 53);
+/// assert!(!u.is_tls());
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Upstream {
     addr: SocketAddr,
+    tls: Option<Arc<TlsTarget>>,
+}
+
+/// Who a TLS upstream must prove to be.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TlsTarget {
+    /// The name the certificate must carry (and SNI), or an IP literal.
+    pub(crate) name: Box<str>,
+    /// SHA-256 of acceptable SubjectPublicKeyInfos; empty for a chain check.
+    pub(crate) pins: Vec<[u8; 32]>,
 }
 
 impl Upstream {
-    /// The server at `addr`.
+    /// The server at `addr`, over UDP and TCP.
     #[must_use]
     pub fn new(addr: SocketAddr) -> Upstream {
-        Upstream { addr }
+        Upstream { addr, tls: None }
+    }
+
+    /// The server at `addr` over TLS, authenticated by `server_name` (a host
+    /// name, sent as SNI, or an IP address the certificate must carry)
+    /// against the resolver's trust anchors: RFC 8310's strict privacy
+    /// profile. Port 853 is DNS over TLS's (RFC 7858).
+    ///
+    /// ```
+    /// # #[cfg(feature = "tls")] {
+    /// let quad9 = dns_net::Upstream::tls("9.9.9.9:853".parse()?, "dns.quad9.net")?;
+    /// assert!(quad9.is_tls());
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for a name that is not a host name or an IP address.
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+    pub fn tls(addr: SocketAddr, server_name: &str) -> Result<Upstream, ConfigError> {
+        Upstream::tls_with(addr, server_name, Vec::new())
+    }
+
+    /// The server at `addr` over TLS, authenticated by the SHA-256 of its
+    /// public key (SubjectPublicKeyInfo) matching one of `pins`: RFC 7858's
+    /// key-pinned profile, for a server with a certificate no public CA
+    /// signed. `server_name` is sent as SNI; the certificate's names are not
+    /// checked, its signature over the handshake and its validity are.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Invalid`] for no pins, or a name that is not a host name.
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+    pub fn tls_pinned(
+        addr: SocketAddr,
+        server_name: &str,
+        pins: &[[u8; 32]],
+    ) -> Result<Upstream, ConfigError> {
+        if pins.is_empty() {
+            return Err(ConfigError::Invalid {
+                field: "pins",
+                expected: "at least one SHA-256 pin",
+            });
+        }
+        if server_name.parse::<std::net::IpAddr>().is_ok() {
+            return Err(ConfigError::Invalid {
+                field: "server_name",
+                expected: "a host name (a pinned identity sends it as SNI)",
+            });
+        }
+        Upstream::tls_with(addr, server_name, pins.to_vec())
+    }
+
+    #[cfg(feature = "tls")]
+    fn tls_with(
+        addr: SocketAddr,
+        server_name: &str,
+        pins: Vec<[u8; 32]>,
+    ) -> Result<Upstream, ConfigError> {
+        let name = server_name.strip_suffix('.').unwrap_or(server_name);
+        let valid = name.parse::<std::net::IpAddr>().is_ok()
+            || crate::name::Name::parse_hostname(name).is_ok_and(|n| n.label_count() >= 1);
+        if !valid {
+            return Err(ConfigError::Invalid {
+                field: "server_name",
+                expected: "a host name or an IP address",
+            });
+        }
+        Ok(Upstream {
+            addr,
+            tls: Some(Arc::new(TlsTarget {
+                name: name.into(),
+                pins,
+            })),
+        })
     }
 
     /// Its address.
     #[must_use]
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Whether it is reached over TLS.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        self.tls.is_some()
+    }
+
+    /// The name a TLS upstream is checked against.
+    #[must_use]
+    pub fn server_name(&self) -> Option<&str> {
+        self.tls.as_deref().map(|t| &*t.name)
+    }
+
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn tls_target(&self) -> Option<Arc<TlsTarget>> {
+        self.tls.clone()
     }
 }
 
@@ -112,6 +218,10 @@ pub struct ResolverConfig {
     pub(crate) tcp_connections: usize,
     pub(crate) ip_order: IpOrder,
     pub(crate) policy: Arc<dyn AddressPolicy>,
+    pub(crate) tls_idle: Duration,
+    pub(crate) tls_handshake: Duration,
+    #[cfg(feature = "tls")]
+    pub(crate) tls_client: Option<tls_net::TlsClient>,
 }
 
 impl fmt::Debug for ResolverConfig {
@@ -131,6 +241,8 @@ impl fmt::Debug for ResolverConfig {
             .field("max_waiting", &self.max_waiting)
             .field("tcp_connections", &self.tcp_connections)
             .field("ip_order", &self.ip_order)
+            .field("tls_idle", &self.tls_idle)
+            .field("tls_handshake", &self.tls_handshake)
             .finish_non_exhaustive()
     }
 }
@@ -165,6 +277,10 @@ impl ResolverConfig {
             tcp_connections: 8,
             ip_order: IpOrder::Ipv4First,
             policy: Arc::new(AllowAll),
+            tls_idle: Duration::from_secs(10),
+            tls_handshake: Duration::from_secs(5),
+            #[cfg(feature = "tls")]
+            tls_client: None,
         }
     }
 
@@ -317,10 +433,50 @@ impl ResolverConfig {
         self
     }
 
+    /// How long a TLS connection with nothing in flight stays open for the
+    /// next query (10 s; 1 s to 5 minutes). RFC 7858 asks clients to reuse
+    /// connections; a server may close earlier, and the next query opens a
+    /// new one.
+    pub fn tls_idle(mut self, idle: Duration) -> ResolverConfig {
+        self.tls_idle = idle;
+        self
+    }
+
+    /// The most a TLS connection may take to connect and finish its
+    /// handshake (5 s; 100 ms to 30 s). Queries waiting for it have this on
+    /// top of their timeout.
+    pub fn tls_handshake_timeout(mut self, timeout: Duration) -> ResolverConfig {
+        self.tls_handshake = timeout;
+        self
+    }
+
+    /// The TLS client for TLS upstreams: its trust anchors, policy, and
+    /// resumption store (by default `tls_net::client()`: the Mozilla roots).
+    #[cfg(feature = "tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
+    pub fn tls_client(mut self, client: tls_net::TlsClient) -> ResolverConfig {
+        self.tls_client = Some(client);
+        self
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |field, expected| Err(ConfigError::Invalid { field, expected });
         if self.upstreams.is_empty() {
             return Err(ConfigError::NoUpstreams);
+        }
+        // RFC 8310's strict profile: a resolver that asks over TLS never
+        // falls back to plaintext, so TLS and plain upstreams do not mix.
+        let tls = self.upstreams.iter().filter(|u| u.is_tls()).count();
+        if tls != 0 && tls != self.upstreams.len() {
+            return invalid("upstreams", "all over TLS or none");
+        }
+        if self.tls_idle < Duration::from_secs(1) || self.tls_idle > Duration::from_secs(300) {
+            return invalid("tls_idle", "from 1 s to 5 minutes");
+        }
+        if self.tls_handshake < Duration::from_millis(100)
+            || self.tls_handshake > Duration::from_secs(30)
+        {
+            return invalid("tls_handshake_timeout", "from 100 ms to 30 s");
         }
         if self.timeout < Duration::from_millis(50) || self.timeout > Duration::from_secs(30) {
             return invalid("timeout", "from 50 ms to 30 s");
@@ -634,20 +790,24 @@ End of search: 4 match(es) found.\r\n";
             ResolverConfig::new().validate(),
             Err(ConfigError::NoUpstreams)
         );
-        assert!(ResolverConfig::new().upstream(up).validate().is_ok());
+        assert!(
+            ResolverConfig::new()
+                .upstream(up.clone())
+                .validate()
+                .is_ok()
+        );
+        let c = || ResolverConfig::new().upstream(up.clone());
         let bad = [
-            ResolverConfig::new()
-                .upstream(up)
-                .timeout(Duration::from_millis(10)),
-            ResolverConfig::new().upstream(up).attempts(0),
-            ResolverConfig::new()
-                .upstream(up)
-                .deadline(Duration::from_millis(100)),
-            ResolverConfig::new().upstream(up).edns_payload(Some(100)),
-            ResolverConfig::new().upstream(up).source_ports(0, 10),
-            ResolverConfig::new().upstream(up).source_ports(2000, 1000),
-            ResolverConfig::new().upstream(up).max_in_flight(0),
-            ResolverConfig::new().upstream(up).tcp_connections(0),
+            c().timeout(Duration::from_millis(10)),
+            c().attempts(0),
+            c().deadline(Duration::from_millis(100)),
+            c().edns_payload(Some(100)),
+            c().source_ports(0, 10),
+            c().source_ports(2000, 1000),
+            c().max_in_flight(0),
+            c().tcp_connections(0),
+            c().tls_idle(Duration::from_millis(10)),
+            c().tls_handshake_timeout(Duration::from_secs(60)),
         ];
         for c in bad {
             assert!(
@@ -663,5 +823,32 @@ End of search: 4 match(es) found.\r\n";
         // Every Windows machine CI runs on has at least one adapter with DNS.
         let c = ResolverConfig::system().unwrap();
         assert!(!c.upstreams().is_empty());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_upstreams() {
+        let a = sa("192.0.2.53:853");
+        assert!(Upstream::tls(a, "dns.example").is_ok());
+        assert!(Upstream::tls(a, "dns.example.").is_ok());
+        assert!(Upstream::tls(a, "192.0.2.53").is_ok());
+        assert!(Upstream::tls(a, "bad name").is_err());
+        assert!(Upstream::tls(a, "").is_err());
+        assert!(Upstream::tls_pinned(a, "dns.example", &[]).is_err());
+        assert!(Upstream::tls_pinned(a, "192.0.2.53", &[[0; 32]]).is_err());
+        let pinned = Upstream::tls_pinned(a, "dns.example", &[[7; 32]]).unwrap();
+        assert_eq!(pinned.server_name(), Some("dns.example"));
+        // No mixing with plaintext upstreams (RFC 8310 strict profile).
+        let mixed = ResolverConfig::new()
+            .upstream(pinned.clone())
+            .upstream(Upstream::new(sa("192.0.2.1:53")));
+        assert!(matches!(
+            mixed.validate(),
+            Err(ConfigError::Invalid {
+                field: "upstreams",
+                ..
+            })
+        ));
+        assert!(ResolverConfig::new().upstream(pinned).validate().is_ok());
     }
 }

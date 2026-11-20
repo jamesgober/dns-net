@@ -72,6 +72,9 @@ pub enum Error {
     Random,
     /// A socket operation failed.
     Io(io::ErrorKind),
+    /// A TLS upstream's handshake failed: its certificate or key did not
+    /// match, or it did not speak TLS.
+    Tls,
 }
 
 impl fmt::Display for Error {
@@ -90,6 +93,7 @@ impl fmt::Display for Error {
             Error::Stopped => f.write_str("the resolver has stopped"),
             Error::Random => f.write_str("the system's random source failed"),
             Error::Io(kind) => write!(f, "socket error: {kind}"),
+            Error::Tls => f.write_str("the TLS handshake with the upstream failed"),
         }
     }
 }
@@ -206,6 +210,16 @@ impl Lookup {
         })
     }
 
+    /// Whether the answer is DNSSEC-validated by the upstream: every reply
+    /// behind it had the AD bit set, and came over a path an attacker cannot
+    /// write to (a TLS upstream, or one on loopback). An AD bit from a plain
+    /// upstream across a network is never reported, since anyone on the path
+    /// could set it (RFC 6698 section 1.3, RFC 7672).
+    #[must_use]
+    pub fn authenticated(&self) -> bool {
+        self.entry.authentic
+    }
+
     /// The A and AAAA addresses among the records.
     pub fn ips(&self) -> impl Iterator<Item = IpAddr> + '_ {
         self.entry.records.iter().filter_map(|r| match r.data {
@@ -270,6 +284,8 @@ pub struct ResolverStats {
     pub coalesced: u64,
     /// Lookups answered without a query: `localhost`, `.invalid`, `.onion`.
     pub local: u64,
+    /// TLS connections opened to upstreams (handshakes completed).
+    pub tls_connections: u64,
     /// The cache's counters.
     pub cache: CacheStats,
 }
@@ -291,6 +307,7 @@ struct Counters {
     server_errors: AtomicU64,
     coalesced: AtomicU64,
     local: AtomicU64,
+    tls: AtomicU64,
 }
 
 struct Shared {
@@ -376,6 +393,18 @@ impl Resolver {
             counters: Counters::default(),
             config,
         });
+        #[cfg(feature = "tls")]
+        let tls = if shared.config.upstreams.iter().any(crate::Upstream::is_tls) {
+            match shared.config.tls_client.clone() {
+                Some(c) => Some(c),
+                None => Some(tls_net::client().map_err(|_| Error::Tls)?),
+            }
+        } else {
+            None
+        };
+        #[cfg(feature = "tls")]
+        let engine = Engine::new(Arc::clone(&shared), driver, tls);
+        #[cfg(not(feature = "tls"))]
         let engine = Engine::new(Arc::clone(&shared), driver);
         let thread = std::thread::Builder::new()
             .name("dns-net".into())
@@ -630,6 +659,7 @@ impl Resolver {
             server_errors: get(&c.server_errors),
             coalesced: get(&c.coalesced),
             local: get(&c.local),
+            tls_connections: get(&c.tls),
             cache: lock(&self.shared.cache).stats(),
         }
     }
@@ -728,6 +758,13 @@ fn plan_ip(host: &str, order: IpOrder) -> Result<(Name, IpPlan), Error> {
     Ok((name, IpPlan::Lookup(order.types())))
 }
 
+/// Whether an AD bit from `up` can be believed: it came over TLS, or from
+/// this machine. A plain upstream across a network is a path anyone on it can
+/// write to.
+fn path_is_trusted(up: &crate::Upstream) -> bool {
+    up.is_tls() || up.addr().ip().is_loopback()
+}
+
 /// The URL standard's "ends in a number" rule: a last label of digits only,
 /// or `0x` and hex digits, makes a URL parser read the host as IPv4.
 fn ends_in_number(name: &Name) -> bool {
@@ -817,6 +854,7 @@ fn local_answer(q: &Question) -> Option<Entry> {
                 .into_iter()
                 .collect(),
             chain: Vec::new(),
+            authentic: false,
         });
     }
     if is(b"invalid") || is(b"onion") {
@@ -824,6 +862,7 @@ fn local_answer(q: &Question) -> Option<Entry> {
             status: Status::NxDomain,
             records: Vec::new(),
             chain: Vec::new(),
+            authentic: false,
         });
     }
     None
@@ -853,6 +892,8 @@ struct Flight {
     edns: bool,
     error: Error,
     attempt: Option<Attempt>,
+    /// Every reply so far had the AD bit and came over a trusted path.
+    authentic: bool,
 }
 
 struct Attempt {
@@ -869,7 +910,20 @@ enum Transport {
         socket: Arc<UdpSocket>,
     },
     Tcp,
+    /// On the upstream's TLS connection, under this id.
+    #[cfg(feature = "tls")]
+    Tls {
+        id: u16,
+    },
 }
+
+/// The result of a TLS connect on its helper thread: the upstream, and the
+/// socket and session.
+#[cfg(feature = "tls")]
+type TlsReady = (
+    usize,
+    Result<(std::net::TcpStream, crate::dot::Session), Error>,
+);
 
 struct TcpDone {
     flight: usize,
@@ -905,13 +959,41 @@ struct Engine {
     tcp_active: usize,
     tcp_queue: VecDeque<(usize, u32)>,
     generation: u32,
+    /// Flight tokens start here; below are the TLS connections' (one per
+    /// upstream).
+    base: usize,
+    #[cfg(feature = "tls")]
+    tls: Option<tls_net::TlsClient>,
+    #[cfg(feature = "tls")]
+    dot: Vec<crate::dot::Slot>,
+    #[cfg(feature = "tls")]
+    dot_tx: mpsc::Sender<TlsReady>,
+    #[cfg(feature = "tls")]
+    dot_rx: mpsc::Receiver<TlsReady>,
 }
 
 impl Engine {
-    fn new(shared: Arc<Shared>, driver: Box<dyn Driver>) -> Engine {
+    fn new(
+        shared: Arc<Shared>,
+        driver: Box<dyn Driver>,
+        #[cfg(feature = "tls")] tls: Option<tls_net::TlsClient>,
+    ) -> Engine {
         let (tcp_tx, tcp_rx) = mpsc::channel();
+        #[cfg(feature = "tls")]
+        let (dot_tx, dot_rx) = mpsc::channel();
         let upstreams = shared.config.upstreams.len();
         Engine {
+            base: upstreams,
+            #[cfg(feature = "tls")]
+            tls,
+            #[cfg(feature = "tls")]
+            dot: (0..upstreams)
+                .map(|_| crate::dot::Slot::default())
+                .collect(),
+            #[cfg(feature = "tls")]
+            dot_tx,
+            #[cfg(feature = "tls")]
+            dot_rx,
             shared,
             driver,
             completions: Completions::new(),
@@ -955,6 +1037,10 @@ impl Engine {
             while let Ok(t) = self.tcp_rx.try_recv() {
                 self.on_tcp(t);
             }
+            #[cfg(feature = "tls")]
+            while let Ok((u, r)) = self.dot_rx.try_recv() {
+                self.on_tls_ready(u, r);
+            }
             let jobs = std::mem::take(&mut *lock(&self.shared.queue));
             self.waiting.extend(jobs);
             self.admit();
@@ -968,11 +1054,24 @@ impl Engine {
     }
 
     fn next_expiry(&self) -> Option<Instant> {
-        self.flights
+        let attempts = self
+            .flights
             .iter()
             .flatten()
             .filter_map(|f| f.attempt.as_ref().map(|a| a.expires))
-            .min()
+            .min();
+        #[cfg(feature = "tls")]
+        let attempts = {
+            let idle = self.shared.config.tls_idle;
+            let closes = self
+                .dot
+                .iter()
+                .filter(|s| s.ids.is_empty())
+                .filter_map(|s| s.conn.as_ref().map(|c| c.idle_since + idle))
+                .min();
+            attempts.into_iter().chain(closes).min()
+        };
+        attempts
     }
 
     fn admit(&mut self) {
@@ -1016,6 +1115,7 @@ impl Engine {
             edns: config.payload.is_some(),
             error: Error::Timeout,
             attempt: None,
+            authentic: true,
         };
         let i = match self.free.pop() {
             Some(i) => {
@@ -1047,7 +1147,7 @@ impl Engine {
             }
             let upstream = f.order[f.tries % f.order.len()];
             f.tries += 1;
-            match self.send_udp(i, upstream, now) {
+            match self.send(i, upstream, now) {
                 Ok(()) => return,
                 Err(e) => {
                     if let Some(f) = self.flights[i].as_mut() {
@@ -1056,6 +1156,14 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn send(&mut self, i: usize, upstream: usize, now: Instant) -> Result<(), Error> {
+        #[cfg(feature = "tls")]
+        if self.shared.config.upstreams[upstream].is_tls() {
+            return self.send_tls(i, upstream, now);
+        }
+        self.send_udp(i, upstream, now)
     }
 
     fn send_udp(&mut self, i: usize, upstream: usize, now: Instant) -> Result<(), Error> {
@@ -1098,7 +1206,7 @@ impl Engine {
             .set_nonblocking(true)
             .map_err(|e| Error::Io(e.kind()))?;
         let generation = self.next_generation();
-        let token = Token((u64::from(generation) << 32) | i as u64);
+        let token = Token((u64::from(generation) << 32) | (self.base + i) as u64);
         let shared: SharedSocket = socket.clone();
         self.driver.register(shared, token).map_err(net_error)?;
         let sent = socket.send(exchange.bytes());
@@ -1157,7 +1265,13 @@ impl Engine {
     }
 
     fn on_completion(&mut self, c: Completion) {
-        let i = (c.token.0 & 0xFFFF_FFFF) as usize;
+        let index = (c.token.0 & 0xFFFF_FFFF) as usize;
+        if index < self.base {
+            #[cfg(feature = "tls")]
+            self.on_tls_completion(index, c);
+            return;
+        }
+        let i = index - self.base;
         let generation = (c.token.0 >> 32) as u32;
         let current = self
             .flights
@@ -1220,7 +1334,7 @@ impl Engine {
     fn udp_socket(&self, i: usize) -> Option<Arc<UdpSocket>> {
         match &self.flights.get(i)?.as_ref()?.attempt.as_ref()?.transport {
             Transport::Udp { socket, .. } => Some(Arc::clone(socket)),
-            Transport::Tcp => None,
+            _ => None,
         }
     }
 
@@ -1272,9 +1386,12 @@ impl Engine {
         };
         let upstream = a.upstream;
         let had_edns = a.exchange.has_edns();
+        let trusted = path_is_trusted(&self.shared.config.upstreams[upstream]);
+        let authentic = f.authentic && trusted && msg.header.authentic_data;
         match Outcome::read_chain(&f.question, &msg, &f.current, &f.chain) {
-            Outcome::Answer(answer) => {
+            Outcome::Answer(mut answer) => {
                 self.failures[upstream] = 0;
+                answer.authentic = authentic;
                 self.finish(i, Ok(answer));
             }
             Outcome::Truncated if !over_tcp => self.start_tcp(i),
@@ -1288,6 +1405,7 @@ impl Engine {
                         f.current = target;
                         f.chain = chain;
                         f.tries = 0;
+                        f.authentic = authentic;
                     }
                     self.attempt(i);
                 }
@@ -1339,12 +1457,29 @@ impl Engine {
 
     fn close(&mut self, i: usize) {
         let attempt = self.flights[i].as_mut().and_then(|f| f.attempt.take());
-        if let Some(Attempt {
-            transport: Transport::Udp { token, .. },
-            ..
-        }) = attempt
-        {
-            let _ = self.driver.deregister(token);
+        match attempt {
+            Some(Attempt {
+                transport: Transport::Udp { token, .. },
+                ..
+            }) => {
+                let _ = self.driver.deregister(token);
+            }
+            #[cfg(feature = "tls")]
+            Some(Attempt {
+                transport: Transport::Tls { id },
+                upstream,
+                ..
+            }) => {
+                let slot = &mut self.dot[upstream];
+                slot.ids.remove(&id);
+                slot.queued.retain(|&q| q != id);
+                if slot.ids.is_empty() {
+                    if let Some(c) = slot.conn.as_mut() {
+                        c.idle_since = Instant::now();
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1416,6 +1551,24 @@ impl Engine {
                 self.fail(i, Error::Timeout);
             }
         }
+        #[cfg(feature = "tls")]
+        {
+            let idle = self.shared.config.tls_idle;
+            for u in 0..self.dot.len() {
+                let slot = &mut self.dot[u];
+                let quiet = slot.ids.is_empty()
+                    && slot
+                        .conn
+                        .as_ref()
+                        .is_some_and(|c| c.idle_since + idle <= now);
+                if quiet {
+                    if let Some(mut c) = slot.conn.take() {
+                        c.close();
+                        let _ = self.driver.deregister(c.token);
+                    }
+                }
+            }
+        }
     }
 
     fn finish(&mut self, i: usize, result: Result<crate::exchange::Answer, Error>) {
@@ -1431,6 +1584,7 @@ impl Engine {
                 status: answer.status,
                 records: answer.records,
                 chain: answer.chain,
+                authentic: answer.authentic,
             });
             let expires = lock(&self.shared.cache).insert(
                 &f.question.name,
@@ -1464,10 +1618,278 @@ impl Engine {
                 self.finish(i, Err(Error::Stopped));
             }
         }
+        #[cfg(feature = "tls")]
+        for slot in &mut self.dot {
+            if let Some(mut c) = slot.conn.take() {
+                c.close();
+                let _ = self.driver.deregister(c.token);
+            }
+        }
         let mut jobs: Vec<Job> = self.waiting.drain(..).collect();
         jobs.extend(lock(&self.shared.queue).drain(..));
         let waiters = jobs.into_iter().map(|j| j.done).collect();
         self.deliver(waiters, &Err(Error::Stopped));
+    }
+}
+
+/// What a query is padded to on a TLS connection (RFC 8467 section 4.1).
+#[cfg(feature = "tls")]
+const QUERY_BLOCK: usize = 128;
+
+#[cfg(feature = "tls")]
+impl Engine {
+    /// Sends attempt `i` on the upstream's TLS connection, or queues it for a
+    /// connection being opened (and opens one when none is).
+    fn send_tls(&mut self, i: usize, upstream: usize, now: Instant) -> Result<(), Error> {
+        let config = &self.shared.config;
+        let (timeout, handshake, payload, case) = (
+            config.timeout,
+            config.tls_handshake,
+            config.payload,
+            config.case_randomization,
+        );
+        let (question, deadline, edns) = {
+            let f = self.flights[i].as_ref().ok_or(Error::Stopped)?;
+            (
+                Question {
+                    name: f.current.clone(),
+                    qtype: f.question.qtype,
+                    qclass: Class::IN,
+                },
+                f.deadline,
+                f.edns,
+            )
+        };
+        // Ids are unique among the queries on one connection: they are how
+        // replies, which may come in any order, find their query.
+        let id = loop {
+            let id = self.random.u16().map_err(|_| Error::Random)?;
+            if !self.dot[upstream].ids.contains_key(&id) {
+                break id;
+            }
+        };
+        let mut bits = [0u8; 32];
+        let need = if case {
+            question.name.letter_count().div_ceil(8).min(32)
+        } else {
+            0
+        };
+        self.random
+            .fill(&mut bits[..need])
+            .map_err(|_| Error::Random)?;
+        let exchange = Exchange::padded(
+            &question,
+            id,
+            &bits[..need],
+            payload.filter(|_| edns),
+            QUERY_BLOCK,
+        )
+        .map_err(|_| Error::Bogus)?;
+        let generation = self.next_generation();
+        let slot = &mut self.dot[upstream];
+        let ready = slot.conn.is_some();
+        if let Some(conn) = slot.conn.as_mut() {
+            if conn.send(&exchange.tcp_bytes()).is_err() {
+                self.break_conn(upstream, Error::Io(io::ErrorKind::ConnectionReset));
+                return Err(Error::Io(io::ErrorKind::ConnectionReset));
+            }
+        } else {
+            slot.queued.push(id);
+        }
+        let slot = &mut self.dot[upstream];
+        slot.ids.insert(id, (i, generation));
+        let connect = !ready && !slot.connecting;
+        self.shared.counters.queries.fetch_add(1, Ordering::Relaxed);
+        let extra = if ready { Duration::ZERO } else { handshake };
+        if let Some(f) = self.flights[i].as_mut() {
+            f.attempt = Some(Attempt {
+                exchange,
+                upstream,
+                generation,
+                expires: (now + timeout + extra).min(deadline),
+                transport: Transport::Tls { id },
+            });
+        }
+        if connect {
+            self.connect_tls(upstream);
+        }
+        Ok(())
+    }
+
+    /// Opens a connection to `upstream` on a helper thread.
+    fn connect_tls(&mut self, upstream: usize) {
+        let up = &self.shared.config.upstreams[upstream];
+        let (Some(client), Some(target)) = (self.tls.clone(), up.tls_target()) else {
+            self.break_conn(upstream, Error::Tls);
+            return;
+        };
+        let addr = up.addr();
+        let deadline = Instant::now() + self.shared.config.tls_handshake;
+        let tx = self.dot_tx.clone();
+        let waker = self.shared.waker.clone();
+        self.dot[upstream].connecting = true;
+        let spawned = std::thread::Builder::new()
+            .name("dns-net-tls".into())
+            .spawn(move || {
+                let r = crate::dot::connect(&client, addr, &target, deadline);
+                let _ = tx.send((upstream, r));
+                waker.wake();
+            });
+        if let Err(e) = spawned {
+            self.dot[upstream].connecting = false;
+            self.break_conn(upstream, Error::Io(e.kind()));
+        }
+    }
+
+    /// A connect finished: register the socket and send what waited, or
+    /// fail every query that waited for it.
+    fn on_tls_ready(
+        &mut self,
+        upstream: usize,
+        result: Result<(std::net::TcpStream, crate::dot::Session), Error>,
+    ) {
+        self.dot[upstream].connecting = false;
+        let (stream, session) = match result {
+            Ok(ok) => ok,
+            Err(e) => {
+                self.failures[upstream] = self.failures[upstream].saturating_add(1);
+                self.break_conn(upstream, e);
+                return;
+            }
+        };
+        if stream.set_nonblocking(true).is_err() {
+            self.break_conn(upstream, Error::Io(io::ErrorKind::Other));
+            return;
+        }
+        let generation = self.next_generation();
+        let token = Token((u64::from(generation) << 32) | upstream as u64);
+        let mut conn = crate::dot::Conn::new(stream, session, token);
+        let shared: SharedSocket = conn.stream.clone();
+        let registered = self.driver.register(shared, token).is_ok();
+        let receiving = registered
+            && self.pool.take(SizeClass::MEDIUM).is_some_and(|buffer| {
+                self.driver
+                    .submit(Operation::Receive { token, buffer })
+                    .is_ok()
+            });
+        if !receiving {
+            if registered {
+                let _ = self.driver.deregister(token);
+            }
+            self.break_conn(upstream, Error::Io(io::ErrorKind::Other));
+            return;
+        }
+        self.shared.counters.tls.fetch_add(1, Ordering::Relaxed);
+        // Send what waited, in order.
+        let queued = std::mem::take(&mut self.dot[upstream].queued);
+        for id in queued {
+            let Some(&(i, generation)) = self.dot[upstream].ids.get(&id) else {
+                continue;
+            };
+            let framed = self.flights[i]
+                .as_ref()
+                .and_then(|f| f.attempt.as_ref())
+                .filter(|a| a.generation == generation)
+                .map(|a| a.exchange.tcp_bytes());
+            if let Some(framed) = framed {
+                if conn.send(&framed).is_err() {
+                    self.dot[upstream].conn = Some(conn);
+                    self.break_conn(upstream, Error::Io(io::ErrorKind::ConnectionReset));
+                    return;
+                }
+            }
+        }
+        self.dot[upstream].conn = Some(conn);
+    }
+
+    fn on_tls_completion(&mut self, upstream: usize, c: Completion) {
+        let current = self.dot[upstream]
+            .conn
+            .as_ref()
+            .is_some_and(|conn| conn.token == c.token);
+        if !current || c.kind != OperationKind::Receive {
+            return;
+        }
+        let (Ok(n), Some(mut buffer)) = (c.result, c.buffer) else {
+            self.break_conn(upstream, Error::Io(io::ErrorKind::ConnectionReset));
+            return;
+        };
+        if n == 0 {
+            // The server closed the connection (an idle timeout of its own,
+            // RFC 7766 section 6.2.3): queries in flight move on.
+            self.break_conn(upstream, Error::Io(io::ErrorKind::ConnectionReset));
+            return;
+        }
+        let absorbed = match self.dot[upstream].conn.as_mut() {
+            Some(conn) => conn.absorb(buffer.as_slice()),
+            None => return,
+        };
+        let (replies, closed) = match absorbed {
+            Ok(r) => r,
+            Err(_) => {
+                self.break_conn(upstream, Error::Tls);
+                return;
+            }
+        };
+        for reply in replies {
+            self.dispatch_tls(upstream, &reply);
+        }
+        if closed {
+            self.break_conn(upstream, Error::Io(io::ErrorKind::ConnectionReset));
+            return;
+        }
+        let Some(token) = self.dot[upstream].conn.as_ref().map(|c| c.token) else {
+            return;
+        };
+        buffer.clear();
+        if self
+            .driver
+            .submit(Operation::Receive { token, buffer })
+            .is_err()
+        {
+            self.break_conn(upstream, Error::Io(io::ErrorKind::Other));
+        }
+    }
+
+    /// A whole reply from a TLS connection, to the query with its id.
+    fn dispatch_tls(&mut self, upstream: usize, reply: &[u8]) {
+        let id = u16::from_be_bytes([reply[0], reply[1]]);
+        let Some(&(i, generation)) = self.dot[upstream].ids.get(&id) else {
+            // An id with no query: one that timed out, or a confused server.
+            self.shared.counters.ignored.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let current = self.flights[i]
+            .as_ref()
+            .and_then(|f| f.attempt.as_ref())
+            .is_some_and(|a| a.generation == generation);
+        if current && matches!(self.on_reply(i, reply, true), Verdict::Keep) {
+            // On a connection only this query has the id: a reply that does
+            // not match it is the server's error, not a forgery to wait out.
+            self.fail(i, Error::Bogus);
+        }
+    }
+
+    /// Drops the upstream's connection and fails every query on it, each of
+    /// which moves to its next attempt.
+    fn break_conn(&mut self, upstream: usize, e: Error) {
+        if let Some(conn) = self.dot[upstream].conn.take() {
+            let _ = self.driver.deregister(conn.token);
+        }
+        // Taken out before any query fails: a failed query's next attempt
+        // may land on this same upstream, and must not be swept away with
+        // the old ones.
+        self.dot[upstream].queued.clear();
+        let on = std::mem::take(&mut self.dot[upstream].ids);
+        for (_, (i, generation)) in on {
+            let current = self.flights[i]
+                .as_ref()
+                .and_then(|f| f.attempt.as_ref())
+                .is_some_and(|a| a.generation == generation);
+            if current {
+                self.fail(i, e.clone());
+            }
+        }
     }
 }
 
@@ -1544,6 +1966,19 @@ mod tests {
             Some(Error::Name(NameError::NotHostname))
         );
         assert!(plan_ip("fe80::1%eth0", IpOrder::Ipv4First).is_err());
+    }
+
+    #[test]
+    fn only_tls_or_loopback_paths_carry_the_ad_bit() {
+        let plain = |s: &str| crate::Upstream::new(s.parse().unwrap());
+        assert!(path_is_trusted(&plain("127.0.0.1:53")));
+        assert!(path_is_trusted(&plain("[::1]:53")));
+        assert!(!path_is_trusted(&plain("192.0.2.53:53")));
+        assert!(!path_is_trusted(&plain("[2001:db8::53]:53")));
+        #[cfg(feature = "tls")]
+        assert!(path_is_trusted(
+            &crate::Upstream::tls("192.0.2.53:853".parse().unwrap(), "dns.example").unwrap()
+        ));
     }
 
     #[test]

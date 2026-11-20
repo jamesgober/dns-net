@@ -21,6 +21,9 @@ use crate::types::{Opcode, Rcode, RecordType};
 /// several (RFC 1034 section 3.6.2 leaves the bound to the resolver).
 pub const MAX_CHAIN: usize = 8;
 
+/// The EDNS(0) Padding option code (RFC 7830).
+const PADDING: u16 = 12;
+
 /// A query on its way to a server, and the checks its reply must pass.
 ///
 /// ```
@@ -50,7 +53,9 @@ pub struct Exchange {
 impl Exchange {
     /// A recursive query for `question` with `id`, the letters of the name
     /// cased by `case_bits` (one bit per letter; empty leaves the case
-    /// alone), and EDNS(0) advertising `payload` (or no OPT record).
+    /// alone), and EDNS(0) advertising `payload` (or no OPT record). The AD
+    /// bit is set, asking a validating server to report it (RFC 6840 section
+    /// 5.7).
     ///
     /// # Errors
     ///
@@ -61,14 +66,51 @@ impl Exchange {
         case_bits: &[u8],
         payload: Option<u16>,
     ) -> Result<Exchange, EncodeError> {
+        Exchange::padded(question, id, case_bits, payload, 0)
+    }
+
+    /// As [`Exchange::new`], with the query padded to a multiple of `block`
+    /// bytes by an EDNS(0) Padding option (RFC 7830), so its length does not
+    /// tell an observer of an encrypted transport which name was asked for.
+    /// RFC 8467 recommends 128 for queries. A `block` of 0, or no `payload`
+    /// (no OPT record to carry the option), pads nothing.
+    ///
+    /// ```
+    /// use dns_net::{Exchange, Name, Question, RecordType};
+    /// let q = Question::new(Name::parse("example.com")?, RecordType::A);
+    /// let ex = Exchange::padded(&q, 1, &[], Some(1232), 128)?;
+    /// assert_eq!(ex.bytes().len() % 128, 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Exchange::new`].
+    pub fn padded(
+        question: &Question,
+        id: u16,
+        case_bits: &[u8],
+        payload: Option<u16>,
+        block: usize,
+    ) -> Result<Exchange, EncodeError> {
         let sent = Question {
             name: question.name.with_case(case_bits),
             qtype: question.qtype,
             qclass: question.qclass,
         };
         let mut msg = Message::query(id, sent.clone());
+        msg.header.authentic_data = true;
         msg.edns = payload.map(Edns::new);
-        let bytes = msg.encode()?;
+        let mut bytes = msg.encode()?;
+        if let (Some(edns), true) = (msg.edns.as_mut(), block > 0) {
+            // The option itself takes 4 bytes before its zeros.
+            let pad = (block - (bytes.len() + 4) % block) % block;
+            edns.options.push(crate::message::EdnsOption {
+                code: PADDING,
+                data: vec![0; pad].into(),
+            });
+            bytes = msg.encode()?;
+        }
         Ok(Exchange {
             id,
             question: sent,
@@ -211,6 +253,7 @@ pub enum Status {
 }
 
 /// The part of a reply that answers the question.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Answer {
     /// What was found.
@@ -223,6 +266,9 @@ pub struct Answer {
     /// or for a negative answer the SOA's (RFC 2308 section 5). `None` when
     /// a negative answer has no SOA, and must not be cached.
     pub ttl: Option<u32>,
+    /// The reply had the AD bit set: the server says it validated the
+    /// answer with DNSSEC. Worth only as much as the path to that server.
+    pub authentic: bool,
 }
 
 impl Answer {
@@ -353,6 +399,7 @@ impl Outcome {
                 records,
                 chain,
                 ttl,
+                authentic: reply.header.authentic_data,
             });
         }
         // A negative answer's TTL: the SOA of a zone the name is in.
@@ -379,6 +426,7 @@ impl Outcome {
             records,
             ttl: soa_ttl.map(|t| chain_ttl.map_or(t, |c| c.min(t))),
             chain,
+            authentic: reply.header.authentic_data,
         })
     }
 }
