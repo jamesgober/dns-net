@@ -166,7 +166,10 @@ fn every_upstream_silent_times_out_within_the_deadline() {
         took >= Duration::from_millis(1150) && took < Duration::from_secs(3),
         "{took:?}"
     );
-    assert_eq!(a.count() + b.count(), 4);
+    // Counted on both sides: what the resolver sent, and what arrived.
+    let s = r.stats();
+    assert_eq!((s.queries, s.timeouts), (4, 4));
+    assert_eq!((a.count(), b.count()), (2, 2));
 }
 
 #[test]
