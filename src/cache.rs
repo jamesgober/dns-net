@@ -23,6 +23,8 @@ pub(crate) struct Entry {
     pub(crate) status: Status,
     pub(crate) records: Vec<Record>,
     pub(crate) chain: Vec<Record>,
+    /// Every reply behind it had the AD bit and came over a trusted path.
+    pub(crate) authentic: bool,
 }
 
 /// Counters of the cache.
@@ -258,6 +260,7 @@ mod tests {
                 RData::A(Ipv4Addr::new(192, 0, 2, last)),
             )],
             chain: Vec::new(),
+            authentic: false,
         })
     }
 
@@ -266,6 +269,7 @@ mod tests {
             status: Status::NxDomain,
             records: Vec::new(),
             chain: Vec::new(),
+            authentic: false,
         })
     }
 

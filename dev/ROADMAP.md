@@ -21,14 +21,17 @@ The former 0.2 (design lock) and 0.3 (codec and resolver) in one release (PLAN D
 - [x] An attack test for every threat in PLAN section 5; fuzz targets for the codec, the reply checks, names, and the configuration readers.
 - [x] Windows: net-io 0.8.2 registers UDP sockets with its IOCP driver (PLAN 6.1, D-019); every test passes there.
 
-## v0.3.0 - Encrypted transports and DNSSEC awareness
-- [ ] DNS over TLS through tls-net.
-- [ ] The AD bit from a validating upstream reported on each lookup.
-- [ ] The answer-agreement experiment of PLAN 5.1, measured.
-- [ ] Windows upstreams from a net-io adapter API instead of `reg.exe`, if net-io gains one (PLAN D-015).
+## v0.3.0 - DNS over TLS and the AD bit (started 2026-11-20)
+- [x] DNS over TLS through tls-net (feature `tls`): strict and pinned profiles, one pipelined connection per upstream, padding, idle close, no plaintext fallback (PLAN 4.5, D-021 to D-025).
+- [x] The AD bit reported on each lookup, from trusted paths only (PLAN 4.6, D-026).
+- [x] Tests for every TLS path (names, IP identities, pins, untrusted CAs, a server that does not speak TLS, out-of-order replies, idle close, a server that closes, truncation); a fuzz target for the reply framing; transport costs measured.
+- Moved to 0.4.0: the answer-agreement experiment of PLAN 5.1. It needs measurements against public resolvers from more than one network, which neither CI nor the development machine gives; it changes no API, so it does not block 0.3.
+- Moved to 0.4.0: Windows upstreams from a net-io adapter API instead of `reg.exe` (PLAN D-015). net-io has no such API yet; this waits on a net-io release.
 
 ## v0.4.0 - DNS over HTTPS
 - [ ] DNS over HTTPS (RFC 8484) on http-net.
+- [ ] The answer-agreement experiment of PLAN 5.1, measured.
+- [ ] Windows upstreams from a net-io adapter API, once net-io has one.
 
 ## v1.0.0 - Stable
 - [ ] The full audit in `DIRECTIVES.md` section 3, after proxy-net or smtp-net has used the API end to end.

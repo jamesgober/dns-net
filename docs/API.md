@@ -1,6 +1,6 @@
 # dns-net - API Reference
 
-> Every public item of `dns-net` `0.2.0`, grouped by layer, with an example for each. The rustdoc on docs.rs has the full signatures.
+> Every public item of `dns-net` `0.3.0`, grouped by layer, with an example for each. The rustdoc on docs.rs has the full signatures.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -20,6 +20,7 @@
 | Feature | Default | Adds |
 |---|---|---|
 | `resolver` | on | the resolver, cache, configuration readers, and address policy; depends on net-io and mod-rand |
+| `tls` | off | DNS over TLS (`Upstream::tls`, `Upstream::tls_pinned`, `ResolverConfig::tls_client`); adds tls-net with ring and the Mozilla roots |
 
 Without `resolver` the crate is the codec: names, messages, and `Exchange`, with no dependencies.
 
@@ -67,13 +68,13 @@ assert_eq!(Message::decode(&bytes)?.answers[0].to_string(), "example.com. 300 IN
 
 ## One query
 
-`Exchange::new(question, id, case_bits, payload)` builds a query with the given id, case bits, and EDNS payload (or none). `bytes()` is the UDP payload, `tcp_bytes()` has the length prefix. `check(reply)` returns the decoded reply only if it is a response to a standard query with the same id and the question exactly as sent, case included; otherwise a `Mismatch` (`Id`, `Undecodable`, `NotResponse`, `Opcode`, `Question`, `Case`).
+`Exchange::new(question, id, case_bits, payload)` builds a query with the given id, case bits, and EDNS payload (or none), with the AD bit set. `Exchange::padded(.., block)` also pads it to a multiple of `block` bytes with the EDNS(0) Padding option (RFC 7830). `bytes()` is the UDP payload, `tcp_bytes()` has the length prefix. `check(reply)` returns the decoded reply only if it is a response to a standard query with the same id and the question exactly as sent, case included; otherwise a `Mismatch` (`Id`, `Undecodable`, `NotResponse`, `Opcode`, `Question`, `Case`).
 
 `Outcome::read(question, reply)` (or `read_chain` to continue from an earlier CNAME) gives:
 
 | Outcome | Meaning |
 |---|---|
-| `Answer(Answer)` | `status` (`Found`, `NoData`, `NxDomain`), `records` owned by the end of the chain, `chain` of CNAMEs, `ttl` (`None`: do not cache) |
+| `Answer(Answer)` | `status` (`Found`, `NoData`, `NxDomain`), `records` owned by the end of the chain, `chain` of CNAMEs, `ttl` (`None`: do not cache), `authentic` (the reply's AD bit) |
 | `Truncated` | ask again over TCP |
 | `Follow { target, chain }` | the chain ends in a CNAME the reply does not answer |
 | `ServerError(rcode)` | SERVFAIL, REFUSED, FORMERR, NOTIMP, ... |
@@ -105,7 +106,7 @@ let txt = resolver.lookup(&Name::parse("example.com")?, RecordType::TXT)?;
 | `stats()` | `ResolverStats` | queries, TCP queries, ignored replies, timeouts, server errors, coalesced, local, and `CacheStats` |
 | `clear_cache()` | `()` | |
 
-`Lookup`: `name`, `rtype`, `status`, `records`, `chain`, `canonical_name`, `ttl` (seconds left, 0 when not cached), `ips`.
+`Lookup`: `name`, `rtype`, `status`, `records`, `chain`, `canonical_name`, `ttl` (seconds left, 0 when not cached), `ips`, `authenticated` (every reply behind it had the AD bit and came over TLS or from loopback).
 
 `Ticket<T>`: `take()` once the result is there, `is_ready()`.
 
@@ -113,7 +114,7 @@ let txt = resolver.lookup(&Name::parse("example.com")?, RecordType::TXT)?;
 
 `localhost` and its subdomains answer loopback; `.invalid` and `.onion` names do not exist; neither reaches an upstream. Host names that end in a number (`127.1`, `0x7f000001`) are refused by the address lookups with `Error::AmbiguousHost`.
 
-`Error`: `Name`, `AmbiguousHost`, `Config`, `Timeout`, `Server(Rcode)`, `Bogus`, `NotFound(Status)`, `Refused`, `Busy`, `Stopped`, `Random`, `Io(ErrorKind)`.
+`Error`: `Name`, `AmbiguousHost`, `Config`, `Timeout`, `Server(Rcode)`, `Bogus`, `NotFound(Status)`, `Refused`, `Busy`, `Stopped`, `Random`, `Io(ErrorKind)`, `Tls` (a TLS upstream's handshake failed).
 
 ## Configuration
 
@@ -136,6 +137,11 @@ let txt = resolver.lookup(&Name::parse("example.com")?, RecordType::TXT)?;
 | `tcp_connections` | 8 | 1 to 256 |
 | `ip_order` | `Ipv4First` | |
 | `policy` | `AllowAll` | any `AddressPolicy` |
+| `tls_idle` | 10 s | 1 s to 5 minutes |
+| `tls_handshake_timeout` | 5 s | 100 ms to 30 s |
+| `tls_client` (feature `tls`) | `tls_net::client()` | any `tls_net::TlsClient` |
+
+`Upstream::new(addr)` is a plain upstream (UDP, TCP on truncation). With the `tls` feature, `Upstream::tls(addr, server_name)` checks the certificate's chain and name (`server_name` may be an IP address the certificate carries), and `Upstream::tls_pinned(addr, server_name, pins)` checks the SHA-256 of the server's public key. A configuration is all TLS or all plain. `Upstream::is_tls` and `Upstream::server_name` describe one.
 
 ## Address policy
 

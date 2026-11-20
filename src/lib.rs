@@ -37,6 +37,9 @@
 //! - `resolver` (default): the resolver, its cache, the address policies and
 //!   the system configuration readers. Adds net-io and mod-rand. Without it
 //!   the crate is the codec alone, with no dependencies.
+//! - `tls`: DNS over TLS (RFC 7858) for upstreams made with
+//!   `Upstream::tls` or `Upstream::tls_pinned`, through tls-net with the ring
+//!   provider and the Mozilla roots.
 //!
 //! The design and its decisions are in `dev/PLAN.md` in the
 //! [repository](https://github.com/jamesgober/dns-net).
@@ -70,6 +73,8 @@ mod types;
 mod cache;
 #[cfg(feature = "resolver")]
 mod config;
+#[cfg(feature = "tls")]
+mod dot;
 #[cfg(feature = "resolver")]
 mod policy;
 #[cfg(feature = "resolver")]
@@ -114,6 +119,16 @@ pub mod __fuzz {
     #[cfg(feature = "resolver")]
     pub fn registry(text: &str) {
         let _ = crate::config::parse_registry(text);
+    }
+
+    /// The splitter of length-prefixed replies on a TLS connection.
+    #[cfg(feature = "tls")]
+    pub fn tls_frames(data: &[u8]) {
+        let mut plain = data.to_vec();
+        if let Ok(messages) = crate::dot::split_messages(&mut plain) {
+            assert!(plain.len() < 2 + 65_535);
+            assert!(messages.iter().all(|m| m.len() >= 12));
+        }
     }
 }
 

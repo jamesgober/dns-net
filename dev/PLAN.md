@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `dns-net`. A living document: every design decision, idea, or open question about dns-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.2.0` (2026-11-20, tagged on GitHub): the codec, the resolver, the cache, the poisoning defences, and the address policy. Next: `0.3.0`, DNS over TLS and the AD bit.
+> **Status:** `0.3.0` in progress: DNS over TLS (feature `tls`) and the AD bit. `0.2.0` (2026-11-20, tagged on GitHub): the codec, the resolver, the cache, the poisoning defences, and the address policy.
 
 ---
 
@@ -79,6 +79,21 @@ Measured with `benches/codec.rs` on Linux (WSL 2, Rust 1.99, release build) at a
 
 Per attempt, outside the benchmark: one socket, one `bind` (two or more when a random port is taken), `connect`, register, `send`, and the close; on the order of 10 to 20 microseconds of system calls (an estimate, not measured). The random source is read 256 bytes at a time, one system call per about seven queries. Memory: a 4 KiB receive buffer per attempt in flight, the cache's budget (4 MiB by default), and about 200 bytes per waiting lookup.
 
+### 4.5 DNS over TLS (feature `tls`, 0.3)
+
+An upstream made with `Upstream::tls` (authenticated by name against the trust anchors, RFC 8310's strict profile) or `Upstream::tls_pinned` (by the SHA-256 of its public key, RFC 7858's pinned profile) is reached over TLS only, on one connection per upstream:
+
+- **Opening.** The first query to an upstream with no connection opens one. The TCP connect and the handshake run on a short-lived helper thread, with blocking reads and a deadline (`tls_handshake_timeout`, 5 s). Queries that arrive meanwhile wait in order and go out once it is ready.
+- **Running.** The established session moves to the resolver's thread, and its socket goes on the driver. The session runs without I/O (tls-net's `ClientSession`): each receive's ciphertext goes in, plaintext comes out and is split into length-prefixed replies. Queries are sealed and written as they are sent.
+- **Pipelining.** Any number of queries share the connection, each with an id unique on it, and replies are matched by id in any order (RFC 7766 section 6.2.1.1).
+- **Padding.** Every query is padded to a multiple of 128 bytes (RFC 8467), so its length does not give the name away.
+- **Closing.** After `tls_idle` (10 s) with nothing in flight, the resolver sends `close_notify` and closes. A connection the server closes, resets, or breaks fails the queries on it over to their next attempt.
+- **No plaintext fallback.** Configurations mixing TLS and plain upstreams are refused, a truncated reply over TLS is bogus, and a failed handshake is `Error::Tls`, never a retry in the clear (RFC 8310 section 5).
+
+### 4.6 The AD bit (0.3)
+
+Every query sets AD, asking a validating upstream to report it (RFC 6840 section 5.7). `Lookup::authenticated` is true only when every reply behind the answer (the whole CNAME chain) had AD set and came over a path an attacker cannot write to: a TLS upstream, or one on loopback (a validating resolver on the same machine). An AD bit from a plain upstream across a network is never reported, since anyone on the path can set it (RFC 6698 section 1.3). The result is cached with the answer.
+
 ## 5. Threats
 
 | Threat | Defence | Cost |
@@ -92,6 +107,9 @@ Per attempt, outside the benchmark: one socket, one `bind` (two or more when a r
 | server-side request forgery and DNS rebinding | the address policy (`PublicOnly`) runs on every address of every lookup, cached or not; IP literals and `localhost` go through it too; host names that end in a number (`127.1`, `0x7f000001`) are refused, since URL parsers read them as IPv4; the caller connects to the addresses returned | a few nanoseconds per address |
 | leaking local names to the network | `localhost` and names under it answer loopback locally; `.invalid` and `.onion` names do not exist (RFC 6761, RFC 7686) | none |
 | amplification abuse | client only: no socket listens; a query arriving on a client socket is dropped | none |
+| eavesdropping on which names a host looks up (feature `tls`) | DNS over TLS with queries padded to 128-byte blocks (RFC 8467) | measured on loopback under load: a lookup on a reused connection costs the same as over UDP (185 against 191 microseconds median); a new connection's handshake adds about 0.75 ms on loopback (947 microseconds median), and 3 network round trips on a real path; padding adds at most 127 bytes per query |
+| a TLS upstream impersonated or downgraded (feature `tls`) | the certificate's chain and name (or the key's pin) are checked; a failed handshake is an error, never a plaintext retry; TLS and plain upstreams cannot be mixed; a truncated reply over TLS is bogus | a handshake per connection (above) |
+| a forged AD bit | reported only when every reply came over TLS or from loopback | none |
 | resource exhaustion through lookups | at most 256 queries in flight and 4,096 waiting by default (then `Busy`); a deadline per lookup; 8 TCP connections at once; a byte budget on the cache with CLOCK eviction | bounded memory, given above |
 | a slow or dead upstream | an attempt timeout (2 s), rounds over the upstreams (2), upstreams that fail are tried last, an ICMP refusal moves on at once | one timeout per dead upstream at most per lookup |
 
@@ -134,4 +152,11 @@ net-io (UDP sockets through its reactor driver, TCP connections), mod-rand (the 
 | D-017 | 2026-11-20 | FORMERR to a query with EDNS: once more without it, same upstream | RFC 6891 section 7; a forged FORMERR needs the same id, port and case as any forgery |
 | D-018 | 2026-11-20 | Randomness from mod-rand's OS tier, 256 bytes per read, no fallback | a predictable id or port defeats the defences; a failing source fails the lookup (fail closed) |
 | D-019 | 2026-11-20 | net-io 0.8.2 with `reactor` alone | 0.8.2 registers UDP sockets with the IOCP driver, delivers every queued datagram on epoll and kqueue, and builds without `proxy` (6.1) |
+| D-021 | 2026-11-20 | DNS over TLS behind an optional `tls` feature, through tls-net 0.10 with the ring provider and the Mozilla roots | tls-net is first-party and the stack's only place for rustls; optional, so the resolver and the codec keep no third-party code by default; ring needs no build tools beyond a C compiler |
+| D-022 | 2026-11-20 | Connect and handshake on a helper thread, then the session runs without I/O on the resolver's thread on the driver | the driver has no connect for a socket std cannot create unconnected and non-blocking, and a handshake happens once per connection; pipelined queries afterwards need a reader that never blocks the resolver, which the driver gives |
+| D-023 | 2026-11-20 | One connection per TLS upstream, any number of queries on it matched by id, ids unique per connection; closed after 10 s idle | RFC 7858 asks for reuse and allows pipelining; one connection keeps the handshake cost to one per idle period; a server that closes earlier costs a new handshake on the next query |
+| D-024 | 2026-11-20 | Strict privacy profile only: TLS and plain upstreams do not mix, a failed handshake is an error, a truncated reply over TLS is bogus | RFC 8310 section 5: an opportunistic fallback to plaintext gives an active attacker the names anyway |
+| D-025 | 2026-11-20 | Queries over TLS padded to a multiple of 128 bytes; replies are not checked for padding | RFC 8467's recommended block for queries; a reply's padding is the server's choice and protects the server's side |
+| D-026 | 2026-11-20 | `Lookup::authenticated` reports AD only when every reply behind the answer had it and came over TLS or from loopback | an AD bit on a path anyone can write to is worth nothing, and a consumer (DANE, a mail sender) must not act on it |
+| D-027 | 2026-11-20 | `break_conn` takes the connection's queries out before failing any of them | a failed query's next attempt can land on the same upstream at once, and was swept away with the old ones (found by the test where the server closes the first connection) |
 | D-020 | 2026-11-20 | Each attempt's port is bound through net-io's UDP bind, which is exclusive on Windows (`SO_EXCLUSIVEADDRUSE`); the driver gets a standard handle to the same socket | Windows lets a wildcard bind take a port another socket holds on a specific address, and datagrams to that address go to the other socket. On a machine with 552 UDP ports bound to 127.0.0.1, 4 of 300 lookups lost their reply that way; worse, a local process on that port receives the replies and could answer in their place. An exclusive bind fails instead, and the next random port is tried. Linux and macOS already refuse such a bind. Cost: one more system call per attempt (the handle clone), estimated under 2 microseconds |

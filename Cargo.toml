@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "dns-net"
-version = "0.2.0"
+version = "0.3.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -56,6 +56,9 @@ default = ["resolver"]
 # The resolver, its cache, the address policies, and the readers of the
 # system's DNS configuration. Without it the crate is the codec alone.
 resolver = ["dep:net-io", "dep:mod-rand"]
+# DNS over TLS (RFC 7858) through tls-net, with the ring provider and the
+# Mozilla roots. Off by default: it brings rustls (tls-net's one exception).
+tls = ["resolver", "dep:tls-net"]
 
 
 # DEPENDENCIES
@@ -68,6 +71,8 @@ net-io   = { version = "0.8.2", default-features = false, features = ["reactor",
 # The operating system's random source, for query ids, source ports, and
 # case randomization.
 mod-rand = { version = "1.1", default-features = false, features = ["tier3"], optional = true }
+# TLS sessions for DNS over TLS, driven without I/O on the resolver's thread.
+tls-net  = { version = "0.10", default-features = false, features = ["ring", "webpki-roots"], optional = true }
 
 
 # DEV DEPENDENCIES
@@ -80,6 +85,11 @@ proptest = "1"
 name = "codec"
 harness = false
 required-features = ["resolver"]
+
+[[bench]]
+name = "transport"
+harness = false
+required-features = ["tls"]
 
 
 # RELEASE PROFILE
