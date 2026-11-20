@@ -8,7 +8,7 @@
 ## v0.1.0 - Scaffold (DONE, 2026-10-13)
 - [x] Manifest, README, CHANGELOG, REPS, dual license, CI, deny, clippy, rustfmt, DIRECTIVES, ROADMAP, PLAN.
 
-## v0.2.0 - Resolver (started 2026-11-20)
+## v0.2.0 - Resolver (DONE, 2026-11-20; tagged on GitHub, the first crates.io publish waits on James)
 
 The former 0.2 (design lock) and 0.3 (codec and resolver) in one release (PLAN D-002).
 

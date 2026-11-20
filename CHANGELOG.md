@@ -13,9 +13,9 @@
 
 ---
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-11-20
 
-The codec and the resolver.
+The codec and the resolver. Tagged on GitHub; not yet on crates.io.
 
 ### Added
 
