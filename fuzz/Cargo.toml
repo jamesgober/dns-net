@@ -1,0 +1,46 @@
+[package]
+name    = "dns-net-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+authors = ["James Gober <me@jamesgober.com>"]
+description = "cargo-fuzz targets for dns-net (not published)."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone: not a member of any workspace above it.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dns-net       = { path = ".." }
+
+[[bin]]
+name  = "message"
+path  = "fuzz_targets/message.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "name_text"
+path  = "fuzz_targets/name_text.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "reply"
+path  = "fuzz_targets/reply.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "system_config"
+path  = "fuzz_targets/system_config.rs"
+test  = false
+doc   = false
+bench = false
