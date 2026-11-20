@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "dns-net"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -20,6 +20,9 @@ description = "DNS resolver for Rust: sans-IO message encoding and decoding, a c
 
 # Keywords (5 max)
 keywords = ["dns", "resolver", "network", "udp", "domain"]
+
+# Fuzz targets and local tooling stay out of the package.
+exclude = ["fuzz/", ".github/"]
 
 # Categories
 categories = ["network-programming"]
@@ -41,22 +44,41 @@ name = "dns_net"
 path = "src/lib.rs"
 
 
+[lints.rust]
+# cargo-fuzz builds with `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+
 # FEATURE FLAGS
 # #################################
 [features]
-default = []
+default = ["resolver"]
+# The resolver, its cache, the address policies, and the readers of the
+# system's DNS configuration. Without it the crate is the codec alone.
+resolver = ["dep:net-io", "dep:mod-rand"]
 
 
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None yet. Planned dependencies and the reason for each are listed in
-# dev/PLAN.md; each is added with the first code that needs it.
+# Sockets and the reactor driver the resolver multiplexes its queries on.
+# `proxy` only because net-io 0.8.1's reactor does not build without it.
+net-io   = { version = "0.8.1", default-features = false, features = ["reactor", "proxy"], optional = true }
+# The operating system's random source, for query ids, source ports, and
+# case randomization.
+mod-rand = { version = "1.1", default-features = false, features = ["tier3"], optional = true }
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
+proptest = "1"
+
+
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["resolver"]
 
 
 # RELEASE PROFILE
