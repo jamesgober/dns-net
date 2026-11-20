@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `dns-net`. A living document: every design decision, idea, or open question about dns-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.3.0` in progress: DNS over TLS (feature `tls`) and the AD bit. `0.2.0` (2026-11-20, tagged on GitHub): the codec, the resolver, the cache, the poisoning defences, and the address policy.
+> **Status:** `0.3.0` (2026-11-20, tagged on GitHub): DNS over TLS (feature `tls`) and the AD bit. Next: `0.4.0`, DNS over HTTPS. `0.2.0` (2026-11-20, tagged on GitHub): the codec, the resolver, the cache, the poisoning defences, and the address policy.
 
 ---
 

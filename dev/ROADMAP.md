@@ -21,7 +21,7 @@ The former 0.2 (design lock) and 0.3 (codec and resolver) in one release (PLAN D
 - [x] An attack test for every threat in PLAN section 5; fuzz targets for the codec, the reply checks, names, and the configuration readers.
 - [x] Windows: net-io 0.8.2 registers UDP sockets with its IOCP driver (PLAN 6.1, D-019); every test passes there.
 
-## v0.3.0 - DNS over TLS and the AD bit (started 2026-11-20)
+## v0.3.0 - DNS over TLS and the AD bit (DONE, 2026-11-20; tagged on GitHub)
 - [x] DNS over TLS through tls-net (feature `tls`): strict and pinned profiles, one pipelined connection per upstream, padding, idle close, no plaintext fallback (PLAN 4.5, D-021 to D-025).
 - [x] The AD bit reported on each lookup, from trusted paths only (PLAN 4.6, D-026).
 - [x] Tests for every TLS path (names, IP identities, pins, untrusted CAs, a server that does not speak TLS, out-of-order replies, idle close, a server that closes, truncation); a fuzz target for the reply framing; transport costs measured.

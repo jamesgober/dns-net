@@ -13,9 +13,9 @@
 
 ---
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-11-20
 
-DNS over TLS, and the AD bit.
+DNS over TLS, and the AD bit. Tagged on GitHub; not yet on crates.io.
 
 ### Added
 
