@@ -56,9 +56,15 @@ impl Fake {
         H: Fn(&Message, bool, SocketAddr) -> Reply + Send + Sync + 'static,
     {
         let handler: Arc<Handler> = Arc::new(handler);
-        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).unwrap();
+        // The TCP port with the UDP port's number can be taken: try again.
+        let (udp, tcp, addr) = (0..50)
+            .find_map(|_| {
+                let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
+                let addr = udp.local_addr().ok()?;
+                let tcp = TcpListener::bind(addr).ok()?;
+                Some((udp, tcp, addr))
+            })
+            .expect("a UDP and TCP port pair");
         udp.set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         tcp.set_nonblocking(true).unwrap();
