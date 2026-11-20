@@ -58,10 +58,23 @@ fn poisoning_with_the_wrong_id_fails() {
 #[test]
 fn poisoning_without_the_random_case_fails() {
     // An off-path forger that guessed the id and port still has to guess the
-    // case of every letter; one that sends the name in lower case loses.
+    // case of every letter. This one gets every letter wrong (a forger that
+    // sends lower case is right 1 time in 2^8 for "bank.test").
     let fake = forge_then_answer(|q| {
         let mut m = evil_reply(q);
-        let name = question(q).name.to_lowercase();
+        let flipped: String = question(q)
+            .name
+            .to_string()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        let name = Name::parse(&flipped).unwrap();
         m.question = Some(Question::new(name.clone(), RecordType::A));
         m.answers = vec![Record::new(name, 86_400, RData::A(EVIL.into()))];
         m.encode().unwrap()

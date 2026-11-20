@@ -30,7 +30,8 @@ The codec and the resolver.
   only the records on the chain from the question to its answer are kept.
 - `Resolver`: one thread on net-io's reactor driver, a fresh socket on a
   random port per attempt, TCP when a reply is truncated, retries and
-  failover, identical questions sharing one query, and blocking, callback,
+  failover, identical questions sharing one query, ports bound exclusively
+  so no other local socket can share them, and blocking, callback,
   and parked-session entry points (`park` posts to a net-io worker's
   completion queue).
 - A cache of positive and negative answers with TTL caps and a byte budget.

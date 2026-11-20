@@ -19,7 +19,7 @@ The former 0.2 (design lock) and 0.3 (codec and resolver) in one release (PLAN D
 - [x] Poisoning defences: random ids and source ports, case randomization, connected sockets, answers checked against the question, coalescing.
 - [x] Address policy hook (`AllowAll`, `PublicOnly`) for SSRF and DNS rebinding.
 - [x] An attack test for every threat in PLAN section 5; fuzz targets for the codec, the reply checks, names, and the configuration readers.
-- [ ] Windows: blocked on net-io refusing UDP sockets in its IOCP driver (PLAN 6.1, item 1). The resolver's tests fail on Windows until a net-io release fixes it; the codec works there today. Not deferred: 0.2.0 ships only once Windows passes.
+- [x] Windows: net-io 0.8.2 registers UDP sockets with its IOCP driver (PLAN 6.1, D-019); every test passes there.
 
 ## v0.3.0 - Encrypted transports and DNSSEC awareness
 - [ ] DNS over TLS through tls-net.

@@ -85,6 +85,7 @@ Per attempt, outside the benchmark: one socket, one `bind` (two or more when a r
 |---|---|---|
 | cache poisoning by an off-path forger | random 16-bit ids and random source ports (1024 to 65535, about 16 bits), case randomization (one bit per letter: 13 for `www.example.com`), a socket connected to the upstream, the question echoed exactly; together about 45 bits for a typical name instead of 16 | 68 ns to build, 158 ns to check, a socket per attempt (estimated 10 to 20 microseconds of system calls) |
 | poisoning by records riding along with a real answer | only the chain from the question to its answer is used; only whole answers to questions asked are cached | none measurable (part of reading the answer, 86 ns) |
+| a local process on the same port catching or forging replies (Windows lets a wildcard bind share a port held on a specific address) | each attempt's port is bound exclusively through net-io (D-020); a port in use is skipped | one more system call per attempt (estimate: under 2 microseconds) |
 | birthday attacks (many identical queries in flight) | one query per question in flight; later lookups join it | one hash lookup per new lookup |
 | compression loops, oversized messages | pointers must point strictly backwards; at most 127 pointers and 255 bytes per name; record counts checked against the bytes before anything is reserved; at most 4,096 records | a few hundred steps per name at worst; decoding stays linear in the message |
 | a flood of forged replies at one attempt | ids are compared before decoding; after 256 non-matching replies in one turn the attempt moves to a fresh socket | 1 ns per forged datagram with a wrong id |
@@ -104,11 +105,11 @@ Per attempt, outside the benchmark: one socket, one `bind` (two or more when a r
 
 net-io (UDP sockets through its reactor driver, TCP connections), mod-rand (the OS random source), tls-net for DNS over TLS later.
 
-### 6.1 Found in net-io 0.8.1 while building 0.2
+### 6.1 Found in net-io 0.8.1 while building 0.2, fixed in net-io 0.8.2
 
-1. **The Windows driver refuses UDP sockets.** `Driver::register` checks `SO_ACCEPTCONN` before `SO_TYPE`, and Windows answers `WSAENOPROTOOPT` for a datagram socket, so every UDP registration fails. Blocks the resolver on Windows until net-io fixes it.
-2. **The ready driver loses queued datagrams.** After any short read it marks the socket drained, which holds for a stream but not for datagrams: a second datagram already queued raises no new edge. dns-net drains its socket itself until `WouldBlock` before waiting again (D-012), which is correct with or without the fix.
-3. **`reactor` does not build without `proxy`.** dns-net turns on both.
+1. **The Windows driver refused UDP sockets.** `Driver::register` checked `SO_ACCEPTCONN` before `SO_TYPE`, and Windows answers `WSAENOPROTOOPT` for a datagram socket. net-io 0.8.2 checks the type first; dns-net requires it (D-019).
+2. **The ready driver lost queued datagrams.** After any short read it marked the socket drained, which holds for a stream but not for datagrams. net-io 0.8.2 waits for `WouldBlock` on sockets that are not streams. dns-net still drains its socket itself (D-012).
+3. **`reactor` did not build without `proxy`.** Fixed in net-io 0.8.2; dns-net takes `reactor` alone.
 
 ## 7. Decision log
 
@@ -125,10 +126,12 @@ net-io (UDP sockets through its reactor driver, TCP connections), mod-rand (the 
 | D-009 | 2026-11-20 | One thread per resolver on net-io's reactor driver, a socket per attempt; TCP on short-lived threads | multiplexes any number of queries without blocking callers; a fresh socket per attempt gives a fresh random port; TCP is rare |
 | D-010 | 2026-11-20 | Random source ports drawn by the resolver from 1024 to 65535 (configurable), 8 tries, then the system's choice | does not depend on the OS randomizing ports; ports in use or reserved (Windows reports access denied) are skipped |
 | D-011 | 2026-11-20 | No search list, no hosts file; `localhost`, `.invalid` and `.onion` answered locally | a name means what it says (no surprise lookups of `name.corp.example`); local names never leave the machine |
-| D-012 | 2026-11-20 | After each datagram the attempt's socket is read until `WouldBlock` before the next wait; more than 256 non-matching replies in one turn gives the attempt up | correct whatever the driver assumes about short reads (6.1, item 2), and bounds the work a flood can cause |
+| D-012 | 2026-11-20 | After each datagram the attempt's socket is read until `WouldBlock` before the next wait; more than 256 non-matching replies in one turn gives the attempt up | correct whatever the driver assumes about short reads (6.1, item 2, fixed in net-io 0.8.2; the drain stays as a second safeguard), and bounds the work a flood can cause. Cost: one `recv` that returns `WouldBlock` per reply |
 | D-013 | 2026-11-20 | The address policy is a trait with `AllowAll` (the default) and `PublicOnly` (RFC 6890 special-purpose blocks refused, embedded IPv4 judged, exceptions by network) | proxies and webhook senders need the check at resolve time; a pluggable trait lets a deployment trust its own networks |
 | D-014 | 2026-11-20 | Host names ending in a number are refused by `lookup_ip` | WHATWG URL parsers read `127.1` and `0x7f000001` as IPv4; refusing them closes a gap between what a URL means and what DNS is asked |
 | D-015 | 2026-11-20 | Windows upstreams read from the registry through `%SystemRoot%\System32\reg.exe`, once, with a 5 s limit | `GetAdaptersAddresses` needs `unsafe`, which this crate forbids; the registry values match the adapters' DNS servers; the `fec0:0:0:ffff::1-3` placeholders are skipped. To move to a net-io API when it has one |
 | D-016 | 2026-11-20 | Cache: whole answers keyed by question, CLOCK eviction, byte budget (4 MiB), positive TTL capped at a day, negative at 15 minutes, no entry over an eighth of the budget | bounded memory; one bit per hit instead of reordering; a created name is seen within 15 minutes of a miss |
 | D-017 | 2026-11-20 | FORMERR to a query with EDNS: once more without it, same upstream | RFC 6891 section 7; a forged FORMERR needs the same id, port and case as any forgery |
 | D-018 | 2026-11-20 | Randomness from mod-rand's OS tier, 256 bytes per read, no fallback | a predictable id or port defeats the defences; a failing source fails the lookup (fail closed) |
+| D-019 | 2026-11-20 | net-io 0.8.2 with `reactor` alone | 0.8.2 registers UDP sockets with the IOCP driver, delivers every queued datagram on epoll and kqueue, and builds without `proxy` (6.1) |
+| D-020 | 2026-11-20 | Each attempt's port is bound through net-io's UDP bind, which is exclusive on Windows (`SO_EXCLUSIVEADDRUSE`); the driver gets a standard handle to the same socket | Windows lets a wildcard bind take a port another socket holds on a specific address, and datagrams to that address go to the other socket. On a machine with 552 UDP ports bound to 127.0.0.1, 4 of 300 lookups lost their reply that way; worse, a local process on that port receives the replies and could answer in their place. An exclusive bind fails instead, and the next random port is tried. Linux and macOS already refuse such a bind. Cost: one more system call per attempt (the handle clone), estimated under 2 microseconds |

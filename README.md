@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party dependencies: net-io and mod-rand with the <code>resolver</code> feature (on by default), nothing at all without it.
     </p>
     <blockquote>
-        <strong>Status: <code>0.2.0</code> in progress.</strong> The resolver passes its tests on Linux; on Windows it waits for a net-io fix (see <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>).
+        <strong>Status: <code>0.2.0</code>.</strong> The codec and the resolver, on Linux, macOS, and Windows. DNS over TLS and HTTPS come next (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>).
     </blockquote>
 </div>
 

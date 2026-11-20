@@ -289,14 +289,20 @@ fn many_lookups_at_once() {
     for i in 0..300 {
         let tx = tx.clone();
         r.submit(&n(&format!("h{i}.test")), RecordType::A, move |res| {
-            tx.send(res.is_ok()).unwrap();
+            tx.send(res.err()).unwrap();
         })
         .unwrap();
     }
-    for _ in 0..300 {
-        assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap());
-    }
-    assert_eq!(fake.count(), 300);
+    let errors: Vec<Error> = (0..300)
+        .filter_map(|_| rx.recv_timeout(Duration::from_secs(10)).unwrap())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{} failed: {:?}",
+        errors.len(),
+        &errors[..errors.len().min(5)]
+    );
+    assert_eq!(fake.count(), 300, "{:?}", r.stats());
 }
 
 #[test]

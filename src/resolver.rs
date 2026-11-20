@@ -1131,6 +1131,12 @@ impl Engine {
     /// A UDP socket on a random port of the configured range. Ports in use
     /// (or reserved, which Windows reports as access denied) are skipped; after
     /// 8 tries the system picks, which current systems also randomize.
+    ///
+    /// The port is bound through net-io, which binds exclusively on Windows
+    /// (`SO_EXCLUSIVEADDRUSE`). Without it Windows lets a wildcard bind share a
+    /// port another socket holds on a specific address, and datagrams to that
+    /// address go to the other socket: replies would be lost to, or forged by,
+    /// any local process on that port (D-020).
     fn bind(&mut self, peer: SocketAddr) -> Result<UdpSocket, Error> {
         let any: IpAddr = if peer.is_ipv4() {
             Ipv4Addr::UNSPECIFIED.into()
@@ -1141,17 +1147,13 @@ impl Engine {
         let span = u32::from(high - low) + 1;
         for _ in 0..8 {
             let port = low + self.random.below(span).map_err(|_| Error::Random)? as u16;
-            match UdpSocket::bind((any, port)) {
+            match bind_exclusive(SocketAddr::new(any, port)) {
                 Ok(s) => return Ok(s),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
-                    ) => {}
-                Err(e) => return Err(Error::Io(e.kind())),
+                Err(Error::Io(io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied)) => {}
+                Err(e) => return Err(e),
             }
         }
-        UdpSocket::bind((any, 0)).map_err(|e| Error::Io(e.kind()))
+        bind_exclusive(SocketAddr::new(any, 0))
     }
 
     fn on_completion(&mut self, c: Completion) {
@@ -1467,6 +1469,23 @@ impl Engine {
         let waiters = jobs.into_iter().map(|j| j.done).collect();
         self.deliver(waiters, &Err(Error::Stopped));
     }
+}
+
+/// Binds `addr` through net-io (exclusively on Windows) and returns a
+/// standard socket for the same binding, which the driver registers.
+fn bind_exclusive(addr: SocketAddr) -> Result<UdpSocket, Error> {
+    let bound = net_io::UdpSocket::bind(addr).map_err(|e| match e {
+        NetError::AddrInUse { .. } => Error::Io(io::ErrorKind::AddrInUse),
+        NetError::PermissionDenied { .. } => Error::Io(io::ErrorKind::PermissionDenied),
+        other => net_error(other),
+    })?;
+    #[cfg(unix)]
+    let owned = std::os::fd::AsFd::as_fd(&bound).try_clone_to_owned();
+    #[cfg(windows)]
+    let owned = std::os::windows::io::AsSocket::as_socket(&bound).try_clone_to_owned();
+    // The clone refers to the same socket; net-io's handle closes when
+    // `bound` drops at the end of this function.
+    owned.map(UdpSocket::from).map_err(|e| Error::Io(e.kind()))
 }
 
 /// One query over TCP, within `deadline`.

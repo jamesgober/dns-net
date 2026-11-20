@@ -62,8 +62,9 @@ resolver = ["dep:net-io", "dep:mod-rand"]
 # #################################
 [dependencies]
 # Sockets and the reactor driver the resolver multiplexes its queries on.
-# `proxy` only because net-io 0.8.1's reactor does not build without it.
-net-io   = { version = "0.8.1", default-features = false, features = ["reactor", "proxy"], optional = true }
+# 0.8.2 is the first that registers UDP sockets on Windows. `udp` for its
+# exclusive bind on Windows (PLAN D-020).
+net-io   = { version = "0.8.2", default-features = false, features = ["reactor", "udp"], optional = true }
 # The operating system's random source, for query ids, source ports, and
 # case randomization.
 mod-rand = { version = "1.1", default-features = false, features = ["tier3"], optional = true }
