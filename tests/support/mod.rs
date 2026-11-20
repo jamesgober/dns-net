@@ -65,8 +65,9 @@ impl Fake {
                 Some((udp, tcp, addr))
             })
             .expect("a UDP and TCP port pair");
-        udp.set_read_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
+        // No receive timeout: on Windows a datagram that arrives as a timed
+        // receive gives up can be lost. The loop blocks, and `Drop` wakes it
+        // with an empty datagram.
         tcp.set_nonblocking(true).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -79,6 +80,10 @@ impl Fake {
                     let Ok((n, from)) = udp.recv_from(&mut buf) else {
                         continue;
                     };
+                    if n == 0 {
+                        // The wake from `Drop`, or nothing worth reading.
+                        continue;
+                    }
                     let Ok(query) = Message::decode(&buf[..n]) else {
                         continue;
                     };
@@ -156,6 +161,10 @@ impl Fake {
 impl Drop for Fake {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Wake the UDP loop, which blocks with no timeout.
+        if let Ok(waker) = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)) {
+            let _ = waker.send_to(&[], self.addr);
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
