@@ -18,29 +18,72 @@
 
 <div align="left">
     <p>
-        <strong>dns-net</strong> turns names into addresses without the blocking resolver of the operating system. The message codec is sans-IO and strict; the resolver adds caching, retries, and transport over net-io.
+        <strong>dns-net</strong> is a DNS client for Rust: a strict, sans-IO message codec, and a caching stub resolver on net-io's reactor driver that never blocks a server worker.
     </p>
     <p>
-        It is planned for later: the standard library covers lookups until the stack needs non-blocking resolution, its own cache, or record types beyond addresses (MX for smtp-net, TXT for DKIM and domain verification).
+        Every query goes out on a fresh socket with a random source port, a random id, and the name in random case, and a reply must repeat all three. Only the records that answer the question are used or cached. An address policy runs on every address a lookup returns, so a proxy or a webhook sender can refuse loopback, private, and metadata addresses at resolve time.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party dependencies: net-io and mod-rand with the <code>resolver</code> feature (on by default), nothing at all without it.
     </p>
     <blockquote>
-        <strong>Status: scaffold (<code>0.1.0</code>).</strong> No functional code yet. The design is written down in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a> and the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the public API is locked in <code>0.2.0</code>.
+        <strong>Status: <code>0.2.0</code> in progress.</strong> The resolver passes its tests on Linux; on Windows it waits for a net-io fix (see <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>).
     </blockquote>
 </div>
 
 <hr>
 <br>
 
+## Look up addresses
+
+```rust
+use dns_net::{PublicOnly, Resolver, ResolverConfig};
+
+let resolver = Resolver::new(ResolverConfig::system()?)?;
+let addrs = resolver.lookup_ip("example.com")?;
+
+// For a URL someone else gave you: loopback, private, link-local and the
+// other non-public addresses are refused.
+let webhook = resolver.lookup_ip_with("hooks.example.net", &PublicOnly::new())?;
+```
+
+## Other records
+
+```rust
+use dns_net::{Name, RData, RecordType, Resolver, ResolverConfig};
+
+let resolver = Resolver::new(ResolverConfig::system()?)?;
+let mx = resolver.lookup(&Name::parse("example.com")?, RecordType::MX)?;
+for record in mx.records() {
+    if let RData::Mx { preference, exchange } = &record.data {
+        println!("{preference} {exchange}");
+    }
+}
+```
+
+## From a net-io session
+
+`Resolver::park` and `Resolver::park_ip` return a ticket and post to the worker's completion queue when the answer arrives; the session returns `Step::Park` and reads the ticket in `on_wake`. A cached answer is ready at once and nothing parks. See the [`Resolver::park`](https://docs.rs/dns-net/latest/dns_net/struct.Resolver.html#method.park) example.
+
+## The codec alone
+
+```rust
+use dns_net::{Message, Name, Question, RecordType};
+
+let query = Message::query(7, Question::new(Name::parse("example.com")?, RecordType::TXT));
+let bytes = query.encode()?;
+assert_eq!(Message::decode(&bytes)?, query);
+```
+
+With `default-features = false` the crate is the codec with no dependencies.
+
 ## Scope
 
-Message encoding and decoding with name compression and budgets, A, AAAA, CNAME, MX, TXT, SRV, and NS records, a TTL-respecting cache, UDP with TCP fallback, retries and timeouts, and DNSSEC awareness. A DNS server is out of scope.
+Message encoding and decoding with name compression and budgets; A, AAAA, CNAME, NS, PTR, SOA, MX, TXT, SRV, and CAA records; a TTL-respecting cache with negative caching and a byte budget; UDP with TCP fallback, retries, timeouts, and failover; upstreams from `/etc/resolv.conf` or the Windows adapter settings. DNS over TLS and HTTPS, and DNSSEC awareness, come later. A DNS server is out of scope.
 
-See [`dev/PLAN.md`](./dev/PLAN.md) for the full scope, what is deliberately left to other crates, and the decision log.
+The design, the threats and what each defence costs, and the decision log are in [`dev/PLAN.md`](./dev/PLAN.md); the full API is in [`docs/API.md`](./docs/API.md).
 
 <hr>
 <br>
@@ -55,8 +98,8 @@ See <a href="./dev/DIRECTIVES.md"><code>dev/DIRECTIVES.md</code></a> for enginee
     <h2>License</h2>
     <p>Licensed under either of</p>
     <ul>
-        <li><b>Apache License, Version 2.0</b> &mdash; <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
-        <li><b>MIT License</b> &mdash; <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
+        <li><b>Apache License, Version 2.0</b>: <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
+        <li><b>MIT License</b>: <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
     </ul>
     <p>at your option.</p>
 </div>
